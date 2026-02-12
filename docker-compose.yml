@@ -1,0 +1,10 @@
+services:
+  fiscalmind:
+    build: .
+    container_name: fiscalmind_app
+    network_mode: "host"  # <--- THIS IS THE MAGIC FIX. No more hiding.
+    volumes:
+      - ./chroma_db:/app/chroma_db
+    env_file:
+      - .env
+    restart: always

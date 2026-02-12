@@ -1,0 +1,14 @@
+# Secrets
+.env
+
+# Python junk
+__pycache__/
+*.pyc
+
+# Database (Too big for Git)
+chroma_db/
+
+# OS junk
+.DS_Store
+
+venv/
