@@ -194,10 +194,12 @@ if prompt := st.chat_input("Ask about your document..."):
     
     full_prompt = f"Context (User's Doc): {context_text}\n\nQuestion: {prompt}"
     
-    # Simple Chat (For brevity in this update)
+    # Display User Message
     st.chat_message("user").write(prompt)
     
+    # Display Assistant Response
     with st.chat_message("assistant"):
+        # 1. Get the raw stream from Groq
         stream = client.chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=[
@@ -206,4 +208,17 @@ if prompt := st.chat_input("Ask about your document..."):
             ],
             stream=True
         )
-        response = st.write_stream(stream)
+        
+        # 2. THE FIX: Create a generator to strip the JSON and yield only text
+        def stream_data():
+            for chunk in stream:
+                content = chunk.choices[0].delta.content
+                if content:
+                    yield content
+
+        # 3. Write the clean text stream
+        response = st.write_stream(stream_data)
+        
+    # Optional: Save history to session state if you want it to persist across reruns
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    st.session_state.messages.append({"role": "assistant", "content": response})
