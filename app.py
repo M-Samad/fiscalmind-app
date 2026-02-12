@@ -12,7 +12,7 @@ from sentence_transformers import SentenceTransformer
 
 # 1. SETUP PAGE
 st.set_page_config(page_title="FiscalMind", page_icon="🧠", layout="wide")
-st.title("🧠 FiscalMind: RAG Analyst")
+st.title("🧠 FiscalMind: Pro RAG Analyst")
 
 # Load Secrets
 load_dotenv()

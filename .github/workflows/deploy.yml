@@ -1,0 +1,41 @@
+name: Deploy to AWS
+
+on:
+  push:
+    branches:
+      - main  # Trigger this only when we push to 'main'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v2
+
+    - name: Copy files to Server via SCP
+      uses: appleboy/scp-action@master
+      with:
+        host: ${{ secrets.HOST_DNS }}
+        username: ${{ secrets.USERNAME }}
+        key: ${{ secrets.SSH_PRIVATE_KEY }}
+        source: "." # Copy everything from this repo...
+        target: "~/ai_agent" # ...to this folder on AWS
+        rm: false # Don't delete existing files (like chroma_db!)
+
+    - name: Deploy on Server via SSH
+      uses: appleboy/ssh-action@master
+      with:
+        host: ${{ secrets.HOST_DNS }}
+        username: ${{ secrets.USERNAME }}
+        key: ${{ secrets.SSH_PRIVATE_KEY }}
+        script: |
+          cd ~/ai_agent
+          # 1. Stop the old container
+          sudo docker compose down
+          
+          # 2. Rebuild with new code (takes ~2 mins)
+          sudo docker compose up -d --build
+          
+          # 3. Clean up junk images (save disk space)
+          sudo docker image prune -f
