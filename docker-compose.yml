@@ -1,10 +1,31 @@
 services:
+  # Service 1: The App (Streamlit)
   fiscalmind:
     build: .
     container_name: fiscalmind_app
-    network_mode: "host"  # <--- THIS IS THE MAGIC FIX. No more hiding.
-    volumes:
-      - ./chroma_db:/app/chroma_db
+    network_mode: "host" # Allows app to talk to Nginx easily
+    environment:
+      - DATABASE_URL=postgresql://user:password@localhost:5432/fiscalmind
     env_file:
       - .env
+    depends_on:
+      - db
     restart: always
+    volumes:
+      - ./chroma_db:/app/chroma_db
+
+  # Service 2: The Database (PostgreSQL)
+  db:
+    image: postgres:15
+    container_name: fiscalmind_db
+    network_mode: "host" # Share network so App can talk to DB on localhost
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: fiscalmind
+    volumes:
+      - postgres_data:/var/lib/postgresql/data # Save data even if container dies
+    restart: always
+
+volumes:
+  postgres_data:

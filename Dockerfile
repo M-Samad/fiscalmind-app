@@ -2,17 +2,19 @@ FROM python:3.9-slim
 
 WORKDIR /app
 
+# Install system dependencies (Required for Postgres driver)
 RUN apt-get update && apt-get install -y \
     build-essential \
     curl \
+    libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir --upgrade pip
 
-# Install PyTorch CPU first
+# Install PyTorch CPU (Heavy)
 RUN pip install torch --index-url https://download.pytorch.org/whl/cpu --no-cache-dir
 
-# Install other dependencies
+# Install Logic + Database libs
 RUN pip install --no-cache-dir \
     streamlit \
     groq \
@@ -22,7 +24,10 @@ RUN pip install --no-cache-dir \
     python-dotenv \
     PyPDF2 \
     chromadb \
-    sentence-transformers
+    sentence-transformers \
+    psycopg2-binary \
+    sqlalchemy \
+    bcrypt
 
 COPY . .
 
