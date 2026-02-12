@@ -30,13 +30,22 @@ chroma_client = chromadb.PersistentClient(path=CHROMA_PATH)
 # --- 2. AUTHENTICATION FUNCTIONS ---
 
 def init_db():
-    """Creates the Users table if it doesn't exist."""
+    """Creates the Users and Chats tables if they don't exist."""
     with engine.connect() as conn:
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS users (
                 id SERIAL PRIMARY KEY,
                 username TEXT UNIQUE NOT NULL,
                 password_hash TEXT NOT NULL
+            );
+        """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS chats (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                role TEXT NOT NULL,  -- 'user' or 'assistant'
+                content TEXT NOT NULL,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """))
         conn.commit()
@@ -61,6 +70,26 @@ def login_user(username, password):
     if result and bcrypt.checkpw(password.encode('utf-8'), result[1].encode('utf-8')):
         return result[0] # Return User ID
     return None
+
+def save_message(user_id, role, content):
+    """Saves a single message to the database"""
+    with engine.connect() as conn:
+        conn.execute(
+            text("INSERT INTO chats (user_id, role, content) VALUES (:uid, :r, :c)"),
+            {"uid": user_id, "r": role, "c": content}
+        )
+        conn.commit()
+
+def load_messages(user_id):
+    """Loads chat history for a user"""
+    with engine.connect() as conn:
+        result = conn.execute(
+            text("SELECT role, content FROM chats WHERE user_id = :uid ORDER BY timestamp ASC"),
+            {"uid": user_id}
+        ).fetchall()
+    # Convert to list of dicts for Streamlit: [{'role': 'user', 'content': 'hi'}]
+    return [{"role": row[0], "content": row[1]} for row in result]
+
 
 # --- 3. RAG FUNCTIONS (MULTI-USER) ---
 
@@ -172,8 +201,25 @@ client = Groq(api_key=api_key)
 # ...
 
 # --- CHAT INTERFACE ---
-if "messages" not in st.session_state:
-    st.session_state.messages = [{"role": "system", "content": "You are a helpful financial assistant."}]
+# Always load messages from database to ensure persistence
+# Check if we need to reload (first load or after login)
+if "messages" not in st.session_state or "last_user_id" not in st.session_state or st.session_state.get("last_user_id") != st.session_state.user_id:
+    db_messages = load_messages(st.session_state.user_id)
+    if db_messages:
+        # Filter out system messages from DB and add them separately
+        st.session_state.messages = [msg for msg in db_messages if msg["role"] != "system"]
+        # Add system message if not present
+        if not any(msg.get("role") == "system" for msg in st.session_state.messages):
+            st.session_state.messages.insert(0, {"role": "system", "content": "You are a helpful financial assistant."})
+    else:
+        st.session_state.messages = [{"role": "system", "content": "You are a helpful financial assistant."}]
+    st.session_state.last_user_id = st.session_state.user_id
+
+# Display chat history
+for message in st.session_state.messages:
+    if message["role"] != "system":  # Don't display system messages
+        with st.chat_message(message["role"]):
+            st.write(message["content"])
 
 # Sidebar Upload
 with st.sidebar:
@@ -188,6 +234,7 @@ with st.sidebar:
 
 # Chat Logic
 if prompt := st.chat_input("Ask about your document..."):
+    save_message(st.session_state.user_id, "user", prompt)
     # RETRIEVE FROM PRIVATE COLLECTION
     context_chunks = query_vector_db(prompt, st.session_state.user_id)
     context_text = "\n\n".join(context_chunks)
@@ -218,7 +265,8 @@ if prompt := st.chat_input("Ask about your document..."):
 
         # 3. Write the clean text stream
         response = st.write_stream(stream_data)
+        save_message(st.session_state.user_id, "assistant", response)
         
-    # Optional: Save history to session state if you want it to persist across reruns
+    # Update session state messages (already saved to DB above)
     st.session_state.messages.append({"role": "user", "content": prompt})
     st.session_state.messages.append({"role": "assistant", "content": response})

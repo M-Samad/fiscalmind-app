@@ -14,20 +14,12 @@ RUN pip install --no-cache-dir --upgrade pip
 # Install PyTorch CPU (Heavy)
 RUN pip install torch --index-url https://download.pytorch.org/whl/cpu --no-cache-dir
 
-# Install Logic + Database libs
-RUN pip install --no-cache-dir \
-    streamlit \
-    groq \
-    yfinance \
-    matplotlib \
-    duckduckgo-search \
-    python-dotenv \
-    PyPDF2 \
-    chromadb \
-    sentence-transformers \
-    psycopg2-binary \
-    sqlalchemy \
-    bcrypt
+# 3. Copy only the dependency file
+COPY requirements.txt .
+
+# 4. Install the rest of the libraries
+# Note: Pip will see 'torch' is already installed and skip it, saving time.
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 

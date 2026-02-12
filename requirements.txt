@@ -1,0 +1,12 @@
+streamlit
+groq
+yfinance
+matplotlib
+duckduckgo-search
+python-dotenv
+PyPDF2
+chromadb
+sentence-transformers
+psycopg2-binary
+sqlalchemy
+bcrypt
