@@ -232,41 +232,51 @@ with st.sidebar:
             st.session_state.file_processed = True
             status.update(label=f"✅ Indexed {num} chunks to your private vault!", state="complete")
 
-# Chat Logic
+# --- CHAT LOGIC ---
 if prompt := st.chat_input("Ask about your document..."):
+    # 1. Save & Display User Message
     save_message(st.session_state.user_id, "user", prompt)
-    # RETRIEVE FROM PRIVATE COLLECTION
+    st.chat_message("user").write(prompt)
+    
+    # Update local session state immediately so UI feels responsive
+    st.session_state.messages.append({"role": "user", "content": prompt})
+
+    # 2. Retrieve RAG Context (The "Knowledge")
     context_chunks = query_vector_db(prompt, st.session_state.user_id)
     context_text = "\n\n".join(context_chunks)
     
-    full_prompt = f"Context (User's Doc): {context_text}\n\nQuestion: {prompt}"
+    # 3. BUILD CONTEXT (The "Sliding Window")
+    # Take only the last 10 messages to prevent hitting token limits
+    recent_history = st.session_state.messages[-10:] 
     
-    # Display User Message
-    st.chat_message("user").write(prompt)
+    # Construct the payload for Llama 3
+    api_messages = [
+        {"role": "system", "content": "You are a helpful financial assistant. Use the context provided."},
+        {"role": "user", "content": f"Context from PDF: {context_text}"} 
+    ]
     
-    # Display Assistant Response
+    # Add recent history (Clean dictionary format)
+    for msg in recent_history:
+         api_messages.append({"role": msg["role"], "content": msg["content"]})
+
+    # 4. Generate Answer
     with st.chat_message("assistant"):
-        # 1. Get the raw stream from Groq
         stream = client.chat.completions.create(
             model="llama-3.1-8b-instant",
-            messages=[
-                {"role": "system", "content": "Answer using the context provided."},
-                {"role": "user", "content": full_prompt}
-            ],
+            messages=api_messages, 
             stream=True
         )
         
-        # 2. THE FIX: Create a generator to strip the JSON and yield only text
+        # Helper to strip JSON
         def stream_data():
             for chunk in stream:
                 content = chunk.choices[0].delta.content
                 if content:
                     yield content
-
-        # 3. Write the clean text stream
-        response = st.write_stream(stream_data)
-        save_message(st.session_state.user_id, "assistant", response)
         
-    # Update session state messages (already saved to DB above)
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    st.session_state.messages.append({"role": "assistant", "content": response})
+        # Write to UI
+        response = st.write_stream(stream_data)
+        
+        # 5. Save AI Response to DB
+        save_message(st.session_state.user_id, "assistant", response)
+        st.session_state.messages.append({"role": "assistant", "content": response})
