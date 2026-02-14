@@ -1,7 +1,7 @@
 import streamlit as st
 import os
-import json
-import yfinance as yf
+import time  # Needed for timestamp in memory
+import yfinance as yf # Keeping imports even if unused in this snippet
 import matplotlib.pyplot as plt
 from duckduckgo_search import DDGS
 from groq import Groq
@@ -9,7 +9,6 @@ from dotenv import load_dotenv
 import PyPDF2
 import chromadb
 from sentence_transformers import SentenceTransformer
-import sqlalchemy
 from sqlalchemy import create_engine, text
 import bcrypt
 
@@ -21,11 +20,6 @@ load_dotenv()
 # Use the URL from docker-compose, or default to localhost for testing
 DB_URL = os.getenv("DATABASE_URL", "postgresql://user:password@localhost:5432/fiscalmind")
 engine = create_engine(DB_URL)
-
-# RAG Setup (Chroma)
-# We use a persistent path so data survives restarts
-CHROMA_PATH = "/app/chroma_db" if os.path.exists("/app") else "./chroma_db"
-chroma_client = chromadb.PersistentClient(path=CHROMA_PATH)
 
 # --- 2. AUTHENTICATION FUNCTIONS ---
 
@@ -43,7 +37,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS chats (
                 id SERIAL PRIMARY KEY,
                 user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-                role TEXT NOT NULL,  -- 'user' or 'assistant'
+                role TEXT NOT NULL,
                 content TEXT NOT NULL,
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
@@ -56,11 +50,11 @@ def register_user(username, password):
     try:
         with engine.connect() as conn:
             conn.execute(text("INSERT INTO users (username, password_hash) VALUES (:u, :p)"), 
-                         {"u": username, "p": pwd_hash})
+                        {"u": username, "p": pwd_hash})
             conn.commit()
         return True
     except:
-        return False # Username likely taken
+        return False
 
 def login_user(username, password):
     """Checks credentials and returns User ID."""
@@ -68,7 +62,7 @@ def login_user(username, password):
         result = conn.execute(text("SELECT id, password_hash FROM users WHERE username = :u"), {"u": username}).fetchone()
         
     if result and bcrypt.checkpw(password.encode('utf-8'), result[1].encode('utf-8')):
-        return result[0] # Return User ID
+        return result[0]
     return None
 
 def save_message(user_id, role, content):
@@ -87,11 +81,9 @@ def load_messages(user_id):
             text("SELECT role, content FROM chats WHERE user_id = :uid ORDER BY timestamp ASC"),
             {"uid": user_id}
         ).fetchall()
-    # Convert to list of dicts for Streamlit: [{'role': 'user', 'content': 'hi'}]
     return [{"role": row[0], "content": row[1]} for row in result]
 
-
-# --- 3. RAG FUNCTIONS (MULTI-USER) ---
+# --- 3. RAG & VECTOR FUNCTIONS (MULTI-USER) ---
 
 @st.cache_resource
 def load_embedding_model():
@@ -99,14 +91,22 @@ def load_embedding_model():
 
 embedding_model = load_embedding_model()
 
+# FIX: Cache the Chroma Client to prevent "Client has been closed" error
+@st.cache_resource
+def get_chroma_client():
+    path = "/app/chroma_db" if os.path.exists("/app") else "./chroma_db"
+    return chromadb.PersistentClient(path=path)
+
+chroma_client = get_chroma_client()
+
+def get_collection(name):
+    """Helper to get a collection by name"""
+    return chroma_client.get_or_create_collection(name=name)
+
 def process_pdf(uploaded_file, user_id):
-    """
-    Reads PDF -> Chunks -> Embeds -> Stores in User's Private Collection
-    """
-    # Create a unique collection for this user (e.g., "user_collection_5")
-    collection_name = f"user_collection_{user_id}"
+    """Reads PDF -> Chunks -> Embeds -> Stores in User's Private Collection"""
+    collection_name = f"docs_{user_id}"
     
-    # Delete old collection to keep it fresh (Simple version)
     try:
         chroma_client.delete_collection(collection_name)
     except:
@@ -122,28 +122,55 @@ def process_pdf(uploaded_file, user_id):
     chunk_size = 500
     chunks = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
     
+    if not chunks:
+        return 0
+
     ids = [str(i) for i in range(len(chunks))]
     embeddings = embedding_model.encode(chunks).tolist()
     
     collection.add(documents=chunks, embeddings=embeddings, ids=ids)
     return len(chunks)
 
-def query_vector_db(query, user_id):
-    """Searches ONLY the specific user's collection"""
-    collection_name = f"user_collection_{user_id}"
+# --- TIER 3 MEMORY FUNCTIONS ---
+
+def store_memory(user_id, text, metadata={'type': 'chat'}):
+    """Saves a specific interaction to Episodic Memory."""
+    collection = get_collection(f"memory_{user_id}")
+    mem_id = str(time.time()) # Uses current time as unique ID
+    
+    collection.add(
+        documents=[text],
+        metadatas=[metadata],
+        ids=[mem_id]
+    )
+
+def query_memories(user_id, query_text, n_results=2):
+    """Searches ONLY the user's past conversations."""
     try:
-        collection = chroma_client.get_collection(name=collection_name)
+        collection = chroma_client.get_collection(name=f"memory_{user_id}")
         results = collection.query(
-            query_embeddings=embedding_model.encode([query]).tolist(),
-            n_results=3
+            query_texts=[query_text],
+            n_results=n_results
         )
         return results['documents'][0]
     except:
-        return [] # No collection found for user
+        return []
+
+def query_documents(user_id, query_text, n_results=3):
+    """Searches ONLY the user's uploaded PDFs."""
+    try:
+        collection = chroma_client.get_collection(name=f"docs_{user_id}")
+        results = collection.query(
+            query_texts=[query_text],
+            n_results=n_results
+        )
+        return results['documents'][0]
+    except:
+        return []
 
 # --- 4. THE UI (LOGIN vs DASHBOARD) ---
 
-# Initialize DB
+# Initialize DB Tables
 init_db()
 
 # Session State for Auth
@@ -185,6 +212,7 @@ if st.session_state.user_id is None:
 st.sidebar.title(f"👤 {st.session_state.username}")
 if st.sidebar.button("Logout"):
     st.session_state.user_id = None
+    # st.session_state.messages = [] # Clear local session messages on logout
     st.rerun()
 
 st.title("🧠 FiscalMind: Multi-User Workspace")
@@ -196,87 +224,102 @@ if not api_key:
     st.stop()
 client = Groq(api_key=api_key)
 
-# ... (Insert Tools & Chat Logic Here - Keeping it brief for readability) ...
-# Copy the Tools (get_stock_price, etc.) from the previous version here
-# ...
-
 # --- CHAT INTERFACE ---
-# Always load messages from database to ensure persistence
-# Check if we need to reload (first load or after login)
+
+# 1. Load Messages from DB (Logic: Only if we haven't loaded them yet for this user)
 if "messages" not in st.session_state or "last_user_id" not in st.session_state or st.session_state.get("last_user_id") != st.session_state.user_id:
-    db_messages = load_messages(st.session_state.user_id)
-    if db_messages:
-        # Filter out system messages from DB and add them separately
-        st.session_state.messages = [msg for msg in db_messages if msg["role"] != "system"]
-        # Add system message if not present
-        if not any(msg.get("role") == "system" for msg in st.session_state.messages):
-            st.session_state.messages.insert(0, {"role": "system", "content": "You are a helpful financial assistant."})
-    else:
-        st.session_state.messages = [{"role": "system", "content": "You are a helpful financial assistant."}]
+    st.session_state.messages = []
+
+# Check if we switched users or first load
+if "last_user_id" not in st.session_state or st.session_state.last_user_id != st.session_state.user_id:
+    db_msgs = load_messages(st.session_state.user_id)
+    st.session_state.messages = db_msgs
     st.session_state.last_user_id = st.session_state.user_id
 
-# Display chat history
+# 2. Display Chat History
 for message in st.session_state.messages:
-    if message["role"] != "system":  # Don't display system messages
+    if message["role"] != "system":
         with st.chat_message(message["role"]):
             st.write(message["content"])
 
-# Sidebar Upload
+# 3. Sidebar Upload
 with st.sidebar:
     st.header("My Knowledge Base")
     uploaded_file = st.file_uploader("Upload Private PDF", type=["pdf"])
     if uploaded_file and "file_processed" not in st.session_state:
         with st.status("🔒 Processing Securely...") as status:
-            # PASS USER ID TO PROCESS FUNCTION
             num = process_pdf(uploaded_file, st.session_state.user_id)
             st.session_state.file_processed = True
             status.update(label=f"✅ Indexed {num} chunks to your private vault!", state="complete")
 
-# --- CHAT LOGIC ---
-if prompt := st.chat_input("Ask about your document..."):
-    # 1. Save & Display User Message
-    save_message(st.session_state.user_id, "user", prompt)
+# 4. CHAT LOGIC (TIER 3 MEMORY)
+if prompt := st.chat_input("Ask me anything..."):
+    
+    # A. Display User Message Immediately
     st.chat_message("user").write(prompt)
     
-    # Update local session state immediately so UI feels responsive
+    # B. Add to Session State & DB
     st.session_state.messages.append({"role": "user", "content": prompt})
+    save_message(st.session_state.user_id, "user", prompt)
 
-    # 2. Retrieve RAG Context (The "Knowledge")
-    context_chunks = query_vector_db(prompt, st.session_state.user_id)
-    context_text = "\n\n".join(context_chunks)
+    # C. RETRIEVAL (Dual Brain)
     
-    # 3. BUILD CONTEXT (The "Sliding Window")
-    # Take only the last 10 messages to prevent hitting token limits
-    recent_history = st.session_state.messages[-10:] 
+    # Brain A: Search Documents (Facts)
+    doc_results = query_documents(st.session_state.user_id, prompt)
+    doc_context = "\n".join(doc_results) if doc_results else "No relevant document info."
+
+    # Brain B: Search Memories (Past Chats)
+    mem_results = query_memories(st.session_state.user_id, prompt)
+    mem_context = "\n".join(mem_results) if mem_results else "No relevant past memories."
+
+    # D. CONSTRUCT PROMPT
+    system_prompt = f"""
+    You are an AI assistant.
     
-    # Construct the payload for Llama 3
-    api_messages = [
-        {"role": "system", "content": "You are a helpful financial assistant. Use the context provided."},
-        {"role": "user", "content": f"Context from PDF: {context_text}"} 
-    ]
+    MEMORY FROM PAST CONVERSATIONS:
+    {mem_context}
     
-    # Add recent history (Clean dictionary format)
+    CONTEXT FROM UPLOADED DOCUMENTS:
+    {doc_context}
+    
+    Answer the user's question using the information above.
+    """
+    
+    # Sliding Window (Recent 5 turns)
+    recent_history = st.session_state.messages[-5:] 
+
+    api_messages = [{"role": "system", "content": system_prompt}]
     for msg in recent_history:
-         api_messages.append({"role": msg["role"], "content": msg["content"]})
+        api_messages.append({"role": msg["role"], "content": msg["content"]})
+    
+    # Add the current prompt (redundant if in recent_history, but safe to add explicitly if logic varies)
+    # Note: recent_history already includes the 'prompt' we just appended above. 
+    # To be safe and avoid duplication in API call:
+    if recent_history[-1]['content'] != prompt:
+        api_messages.append({"role": "user", "content": prompt})
 
-    # 4. Generate Answer
+    # E. GENERATE RESPONSE
     with st.chat_message("assistant"):
         stream = client.chat.completions.create(
             model="llama-3.1-8b-instant",
-            messages=api_messages, 
+            messages=api_messages,
             stream=True
         )
         
-        # Helper to strip JSON
+        # FIX: Defined stream_data helper HERE
         def stream_data():
             for chunk in stream:
                 content = chunk.choices[0].delta.content
                 if content:
                     yield content
         
-        # Write to UI
+        # Write stream
         response = st.write_stream(stream_data)
-        
-        # 5. Save AI Response to DB
-        save_message(st.session_state.user_id, "assistant", response)
-        st.session_state.messages.append({"role": "assistant", "content": response})
+
+    # F. AUTO-ARCHIVE (Episodic Memory)
+    memory_text = f"User asked: {prompt} | AI Answered: {response}"
+    store_memory(st.session_state.user_id, memory_text)
+    
+    # Save Assistant Response to DB & State
+    save_message(st.session_state.user_id, "assistant", response)
+    st.session_state.messages.append({"role": "assistant", "content": response})
