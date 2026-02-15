@@ -1,29 +1,44 @@
-name: Deploy to AWS
+name: Elite CI/CD Pipeline
 
 on:
   push:
-    branches:
-      - main  # Trigger this only when we push to 'main'
+    branches: [ "main" ]
 
 jobs:
-  deploy:
+  build-and-deploy:
     runs-on: ubuntu-latest
-    
-    steps:
-    - name: Checkout Code
-      uses: actions/checkout@v2
 
-    - name: Copy files to Server via SCP
+    steps:
+    # 1. Checkout Code
+    - uses: actions/checkout@v3
+
+    # 2. Login to Docker Hub
+    - name: Login to Docker Hub
+      uses: docker/login-action@v2
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+    # 3. Build and Push Image (The Heavy Lifting)
+    - name: Build and push
+      uses: docker/build-push-action@v4
+      with:
+        context: .
+        push: true
+        tags: ${{ secrets.DOCKERHUB_USERNAME }}/fiscalmind:latest
+
+    # 4. Copy ONLY docker-compose.yml to Server
+    - name: Copy Config to Server
       uses: appleboy/scp-action@master
       with:
         host: ${{ secrets.HOST_DNS }}
         username: ${{ secrets.USERNAME }}
-        key: ${{ secrets.SSH_PRIVATE_KEY }}
-        source: "." # Copy everything from this repo...
-        target: "~/ai_agent" # ...to this folder on AWS
-        rm: false # Don't delete existing files (like chroma_db!)
+        key: ${{ secrets.SSH_PRIVATE_KEY }} # Make sure this matches your secret name!
+        source: "docker-compose.yml"
+        target: "~/ai_agent"
 
-    - name: Deploy on Server via SSH
+    # 5. Deploy on Server (The Fast Part)
+    - name: Deploy via SSH
       uses: appleboy/ssh-action@master
       with:
         host: ${{ secrets.HOST_DNS }}
@@ -31,11 +46,12 @@ jobs:
         key: ${{ secrets.SSH_PRIVATE_KEY }}
         script: |
           cd ~/ai_agent
-          # 1. Stop the old container
-          sudo docker compose down
           
-          # 2. Rebuild with new code (takes ~2 mins)
-          sudo docker compose up -d --build
+          # Pull the new image (Fast download)
+          sudo docker compose pull
           
-          # 3. Clean up junk images (save disk space)
+          # Restart only the app (Zero downtime for DB)
+          sudo docker compose up -d
+          
+          # Cleanup old images to save space
           sudo docker image prune -f

@@ -1,7 +1,9 @@
 services:
   # Service 1: The App (Streamlit)
   fiscalmind:
-    build: .
+    # build: .
+    image: ${{ secrets.DOCKERHUB_USERNAME }}/fiscalmind:latest
+
     container_name: fiscalmind_app
     network_mode: "host" # Allows app to talk to Nginx easily
     environment:
