@@ -1,38 +1,26 @@
 version: '3.8'
 
 services:
-  # 1. The Traffic Cop (New!)
-  nginx:
-    image: nginx:latest
-    ports:
-      - "80:80"   # Open Standard Web Port
-    volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-    depends_on:
-      - fiscalmind
-
-  # 2. The App (Streamlit)
+  # 1. The App (Back to exposing 8501 for Localhost)
   fiscalmind:
     image: ${{ secrets.DOCKERHUB_USERNAME }}/fiscalmind:latest
     container_name: fiscalmind_app
-    # REMOVE: ports: - "8501:8501" (We don't want direct access anymore!)
-    expose:
-      - "8501" # Only let Nginx talk to it
-    environment:
-      # OVERRIDE: Change 'localhost' to 'db'
-      - DATABASE_URL=postgresql://user:password@db:5432/fiscalmind
+    network_mode: "host" # <--- Switch back to this for simplicity with Old Nginx
     env_file:
       - .env
+    environment:
+      - DATABASE_URL=postgresql://user:password@db:5432/fiscalmind
     depends_on:
       - db
     restart: always
     volumes:
       - ./chroma_db:/app/chroma_db
 
-  # 3. The Database (Same as before)
+  # 2. The Database
   db:
     image: postgres:15
     container_name: fiscalmind_db
+    network_mode: "host" # Share network so Old Nginx can find App easily
     environment:
       POSTGRES_USER: user
       POSTGRES_PASSWORD: password
